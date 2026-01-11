@@ -21,7 +21,10 @@ st.write("Scalable sentiment analysis with fast and accurate model selection.")
 # --------------------------------------------------
 # DOWNLOAD NLTK DATA (ONCE)
 # --------------------------------------------------
-nltk.download("vader_lexicon", quiet=True)
+try:
+    nltk.data.find('vader_lexicon')
+except LookupError:
+    nltk.download("vader_lexicon", quiet=True)
 
 # --------------------------------------------------
 # LOAD MODELS (CACHED)
@@ -32,15 +35,25 @@ def load_vader():
 
 @st.cache_resource(show_spinner=False)
 def load_transformer():
-    return pipeline(
-        "sentiment-analysis",
-        model="cardiffnlp/twitter-roberta-base-sentiment"
-    )
+    try:
+        # Using a smaller, faster model that's more deployment-friendly
+        model = pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english",
+            device=-1  # Force CPU usage
+        )
+        return model
+    except Exception as e:
+        st.error(f"Error loading transformer model: {str(e)}")
+        st.info("Falling back to VADER model")
+        return None
 
 LABEL_MAP = {
     "LABEL_0": "NEGATIVE",
     "LABEL_1": "NEUTRAL",
-    "LABEL_2": "POSITIVE"
+    "LABEL_2": "POSITIVE",
+    "NEGATIVE": "NEGATIVE",
+    "POSITIVE": "POSITIVE"
 }
 
 # --------------------------------------------------
@@ -74,8 +87,15 @@ def vader_sentiment(text, vader):
         return "NEUTRAL", abs(score)
 
 def transformer_sentiment(text, model):
+    if model is None:
+        st.error("Transformer model not available. Please use VADER.")
+        return "NEUTRAL", 0.5
+    
+    # Truncate text to avoid token limits
+    text = text[:512]
     out = model(text)[0]
-    return LABEL_MAP[out["label"]], out["score"]
+    label = LABEL_MAP.get(out["label"], out["label"])
+    return label, out["score"]
 
 # --------------------------------------------------
 # MODEL SELECTION
@@ -86,10 +106,16 @@ model_type = st.radio(
     horizontal=True
 )
 
-if model_type == "Fast (VADER)":
-    sentiment_engine = load_vader()
-else:
-    sentiment_engine = load_transformer()
+# Load selected model with error handling
+with st.spinner(f"Loading {model_type} model..."):
+    if model_type == "Fast (VADER)":
+        sentiment_engine = load_vader()
+    else:
+        sentiment_engine = load_transformer()
+        if sentiment_engine is None:
+            st.warning("Transformer model failed to load. Switching to VADER.")
+            model_type = "Fast (VADER)"
+            sentiment_engine = load_vader()
 
 CONFIDENCE_THRESHOLD = 0.60
 
@@ -175,7 +201,7 @@ with tab2:
             confidences = []
             aspects_list = []
 
-            batch_size = 32 if model_type == "Accurate (Transformer)" else 1
+            batch_size = 16 if model_type == "Accurate (Transformer)" else 1
             total_batches = math.ceil(len(texts) / batch_size)
 
             progress = st.progress(0)
@@ -192,11 +218,9 @@ with tab2:
                             confidences.append(score)
                             aspects_list.append(", ".join(detect_aspects(text)))
                     else:
-                        outputs = sentiment_engine(batch)
-                        for text, out in zip(batch, outputs):
-                            label = LABEL_MAP[out["label"]]
-                            score = out["score"]
-
+                        for text in batch:
+                            label, score = transformer_sentiment(text, sentiment_engine)
+                            
                             if score < CONFIDENCE_THRESHOLD:
                                 label = "UNCERTAIN"
 
